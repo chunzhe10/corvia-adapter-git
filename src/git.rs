@@ -35,9 +35,99 @@ impl IngestionAdapter for GitAdapter {
         "git"
     }
 
-    async fn ingest(&self, source_path: &str) -> Result<Vec<KnowledgeEntry>> {
-        let result = self.ingest_with_relations(source_path).await?;
-        Ok(result.entries)
+    fn register_chunking(&self, registry: &mut corvia_kernel::chunking_pipeline::FormatRegistry) {
+        use corvia_kernel::chunking_strategy::ChunkingStrategy;
+        use std::sync::Arc;
+        let ast = Arc::new(crate::ast_chunker::AstChunker::new());
+        for ext in ast.supported_extensions() {
+            registry.register_override(ext, ast.clone());
+        }
+    }
+
+    async fn ingest_sources(
+        &self,
+        source_path: &str,
+    ) -> Result<Vec<corvia_kernel::chunking_strategy::SourceFile>> {
+        use corvia_kernel::chunking_strategy::{SourceFile, SourceMetadata};
+
+        let path = Path::new(source_path);
+        if !path.exists() {
+            return Err(CorviaError::Ingestion(format!(
+                "Path does not exist: {source_path}"
+            )));
+        }
+
+        let source_version = get_head_sha(path).unwrap_or_else(|| "unknown".to_string());
+        let scope_id = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        info!(
+            "Ingesting sources from {} (version: {}, scope: {})",
+            source_path, source_version, scope_id
+        );
+
+        let mut files = Vec::new();
+
+        for entry in WalkDir::new(path).into_iter().filter_entry(|e| {
+            let name = e.file_name().to_string_lossy();
+            !SKIP_DIRS.iter().any(|skip| name == *skip)
+        }) {
+            let entry =
+                entry.map_err(|e| CorviaError::Ingestion(format!("Walk error: {e}")))?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+
+            let file_path = entry.path();
+            let extension = file_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+
+            if !SUPPORTED_EXTENSIONS.contains(&extension) {
+                continue;
+            }
+
+            let Ok(content) = std::fs::read_to_string(file_path) else {
+                debug!(
+                    "Skipping binary or unreadable file: {}",
+                    file_path.display()
+                );
+                continue;
+            };
+
+            if content.len() > 100_000 {
+                warn!(
+                    "Skipping large file ({}KB): {}",
+                    content.len() / 1024,
+                    file_path.display()
+                );
+                continue;
+            }
+
+            let relative_path = file_path
+                .strip_prefix(path)
+                .unwrap_or(file_path)
+                .to_string_lossy()
+                .to_string();
+
+            files.push(SourceFile {
+                content,
+                metadata: SourceMetadata {
+                    file_path: relative_path,
+                    extension: extension.to_string(),
+                    language: lang_for_ext(extension),
+                    scope_id: scope_id.clone(),
+                    source_version: source_version.clone(),
+                },
+            });
+        }
+
+        info!("Collected {} source files from {}", files.len(), source_path);
+        Ok(files)
     }
 }
 
@@ -138,6 +228,21 @@ impl GitAdapter {
     }
 }
 
+/// Map file extensions to language names for SourceMetadata.
+fn lang_for_ext(ext: &str) -> Option<String> {
+    match ext {
+        "rs" => Some("rust".into()),
+        "js" | "jsx" => Some("javascript".into()),
+        "ts" | "tsx" => Some("typescript".into()),
+        "py" => Some("python".into()),
+        "md" => Some("markdown".into()),
+        "toml" => Some("toml".into()),
+        "yaml" | "yml" => Some("yaml".into()),
+        "json" => Some("json".into()),
+        _ => None,
+    }
+}
+
 fn get_head_sha(path: &Path) -> Option<String> {
     let repo = Repository::discover(path).ok()?;
     let head = repo.head().ok()?;
@@ -152,9 +257,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[tokio::test]
-    async fn test_ingest_nonexistent_path() {
+    async fn test_ingest_sources_nonexistent_path() {
         let adapter = GitAdapter::new();
-        let result = adapter.ingest("/nonexistent/path").await;
+        let result = adapter.ingest_sources("/nonexistent/path").await;
         assert!(result.is_err());
     }
 
@@ -268,5 +373,83 @@ pub struct Bar {
             .unwrap();
         assert!(result.entries.is_empty());
         assert!(result.relations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_ingest_sources_returns_source_files() {
+        let dir = TempDir::new().unwrap();
+
+        // Create a .rs file
+        fs::write(
+            dir.path().join("main.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        )
+        .unwrap();
+
+        // Create a .md file
+        fs::write(dir.path().join("README.md"), "# Hello\n\nWorld.\n").unwrap();
+
+        // Create a .txt file (not in SUPPORTED_EXTENSIONS, should be ignored)
+        fs::write(dir.path().join("notes.txt"), "some notes").unwrap();
+
+        let adapter = GitAdapter::new();
+        let files = adapter
+            .ingest_sources(dir.path().to_str().unwrap())
+            .await
+            .unwrap();
+
+        // Should include .rs and .md but not .txt
+        assert_eq!(files.len(), 2, "expected 2 source files (.rs + .md), got {}", files.len());
+
+        let rs_file = files.iter().find(|f| f.metadata.extension == "rs");
+        assert!(rs_file.is_some(), "expected a .rs SourceFile");
+        let rs = rs_file.unwrap();
+        assert_eq!(rs.metadata.language.as_deref(), Some("rust"));
+        assert!(rs.content.contains("fn main()"));
+        assert!(!rs.metadata.source_version.is_empty());
+
+        let md_file = files.iter().find(|f| f.metadata.extension == "md");
+        assert!(md_file.is_some(), "expected a .md SourceFile");
+        let md = md_file.unwrap();
+        assert_eq!(md.metadata.language.as_deref(), Some("markdown"));
+        assert!(md.content.contains("# Hello"));
+    }
+
+    #[test]
+    fn test_register_chunking_adds_ast_strategy() {
+        use corvia_kernel::chunking_pipeline::FormatRegistry;
+        use corvia_kernel::chunking_strategy::ChunkingStrategy;
+        use std::sync::Arc;
+
+        // Create a registry with a dummy fallback
+        struct DummyFallback;
+        impl ChunkingStrategy for DummyFallback {
+            fn name(&self) -> &str { "dummy" }
+            fn supported_extensions(&self) -> &[&str] { &[] }
+            fn chunk(
+                &self,
+                _source: &str,
+                _meta: &corvia_kernel::chunking_strategy::SourceMetadata,
+            ) -> corvia_common::errors::Result<Vec<corvia_kernel::chunking_strategy::RawChunk>> {
+                Ok(vec![])
+            }
+        }
+
+        let mut registry = FormatRegistry::new(Arc::new(DummyFallback));
+
+        let adapter = GitAdapter::new();
+        adapter.register_chunking(&mut registry);
+
+        // After registration, .rs should resolve to "ast"
+        let resolved = registry.resolve("rs");
+        assert_eq!(resolved.name(), "ast", ".rs should resolve to ast strategy");
+
+        // .py should also resolve to "ast"
+        let resolved_py = registry.resolve("py");
+        assert_eq!(resolved_py.name(), "ast", ".py should resolve to ast strategy");
+
+        // .md should still fall back to dummy (not registered by AstChunker)
+        let resolved_md = registry.resolve("md");
+        assert_eq!(resolved_md.name(), "dummy", ".md should fall back to dummy");
     }
 }

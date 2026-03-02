@@ -29,9 +29,9 @@
 //!
 //! # async fn example() -> corvia_common::errors::Result<()> {
 //! let adapter = GitAdapter::new();
-//! let entries = adapter.ingest("/path/to/repo").await?;
-//! // entries are KnowledgeEntry values without embeddings —
-//! // the kernel adds embeddings after ingestion.
+//! let files = adapter.ingest_sources("/path/to/repo").await?;
+//! // files are SourceFile values (content + metadata) —
+//! // the kernel's ChunkingPipeline handles chunking, embedding, and storage.
 //! # Ok(())
 //! # }
 //! ```
@@ -39,8 +39,10 @@
 //! See the main [Corvia repository](https://github.com/corvia/corvia) for the
 //! full system architecture.
 
+pub mod ast_chunker;
 pub mod treesitter;
 pub mod git;
 
+pub use ast_chunker::AstChunker;
 pub use git::{GitAdapter, IngestionResult};
 pub use treesitter::{CodeRelation, ChunkResult};
