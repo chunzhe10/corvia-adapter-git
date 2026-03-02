@@ -1,8 +1,12 @@
+<p align="center">
+  <img src="docs/assets/corvia-logo.png" alt="corvia" width="200">
+</p>
+
 # corvia-adapter-git
 
 [![AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
-Git repository and source code ingestion adapter for the [Corvia](https://github.com/corvia/corvia) knowledge system, powered by tree-sitter.
+Git repository and source code ingestion adapter for [corvia](https://github.com/corvia/corvia), powered by tree-sitter.
 
 ## Overview
 
@@ -46,7 +50,7 @@ async fn example() -> corvia_common::errors::Result<()> {
 
 ## Related
 
-- [Corvia](https://github.com/corvia/corvia) — The main knowledge system
+- [corvia](https://github.com/corvia/corvia) — The main knowledge system
 - [corvia-kernel](https://github.com/corvia/corvia/tree/master/crates/corvia-kernel) — Core traits and storage
 - [tree-sitter](https://tree-sitter.github.io/) — Parser framework
 
