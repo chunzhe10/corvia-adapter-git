@@ -11,9 +11,9 @@ use crate::treesitter;
 
 /// AST-aware chunking strategy powered by tree-sitter.
 ///
-/// Delegates to [`treesitter::chunk_file`] for the actual parsing, then
-/// maps the resulting [`CodeChunk`]s to [`RawChunk`]s expected by the
-/// kernel pipeline.
+/// Delegates to [`treesitter::chunk_file_with_relations`] for the actual
+/// parsing, then maps the resulting [`CodeChunk`]s and [`CodeRelation`]s
+/// to the kernel's [`RawChunk`] and [`ChunkRelation`] types.
 pub struct AstChunker;
 
 impl AstChunker {
@@ -31,22 +31,42 @@ impl ChunkingStrategy for AstChunker {
         &["rs", "js", "jsx", "ts", "tsx", "py"]
     }
 
-    fn chunk(&self, source: &str, meta: &SourceMetadata) -> Result<Vec<RawChunk>> {
-        let code_chunks = treesitter::chunk_file(&meta.file_path, source, &meta.extension);
-        Ok(code_chunks
-            .into_iter()
+    fn chunk(&self, source: &str, meta: &SourceMetadata) -> Result<ChunkResult> {
+        let result = treesitter::chunk_file_with_relations(&meta.file_path, source, &meta.extension);
+
+        let chunks: Vec<RawChunk> = result
+            .chunks
+            .iter()
             .map(|cc| RawChunk {
-                content: cc.content,
-                chunk_type: cc.chunk_type,
+                content: cc.content.clone(),
+                chunk_type: cc.chunk_type.clone(),
                 start_line: cc.start_line,
                 end_line: cc.end_line,
                 metadata: ChunkMetadata {
-                    source_file: cc.file_path,
-                    language: Some(cc.language),
+                    source_file: cc.file_path.clone(),
+                    language: Some(cc.language.clone()),
                     ..Default::default()
                 },
             })
-            .collect())
+            .collect();
+
+        // Convert chunk-index-based CodeRelations to stable (source_file, start_line) ChunkRelations
+        let relations: Vec<ChunkRelation> = result
+            .relations
+            .iter()
+            .filter_map(|cr| {
+                let source_chunk = result.chunks.get(cr.from_chunk_index)?;
+                Some(ChunkRelation {
+                    from_source_file: source_chunk.file_path.clone(),
+                    from_start_line: source_chunk.start_line,
+                    relation: cr.relation.clone(),
+                    to_file: cr.to_file.clone(),
+                    to_name: cr.to_name.clone(),
+                })
+            })
+            .collect();
+
+        Ok(ChunkResult { chunks, relations })
     }
 }
 
@@ -77,7 +97,7 @@ fn world() {
 "#;
         let chunker = AstChunker::new();
         let meta = meta_for("src/main.rs", "rs");
-        let chunks = chunker.chunk(source, &meta).unwrap();
+        let chunks = chunker.chunk(source, &meta).unwrap().chunks;
 
         assert_eq!(chunks.len(), 2, "expected 2 function_item chunks");
         assert!(chunks[0].content.contains("hello"));
@@ -98,7 +118,7 @@ def standalone():
 "#;
         let chunker = AstChunker::new();
         let meta = meta_for("app.py", "py");
-        let chunks = chunker.chunk(source, &meta).unwrap();
+        let chunks = chunker.chunk(source, &meta).unwrap().chunks;
 
         // Should produce at least a class and a function chunk.
         assert!(
@@ -113,7 +133,7 @@ def standalone():
         let source = "some content\nin a file\nwith multiple lines";
         let chunker = AstChunker::new();
         let meta = meta_for("data.txt", "txt");
-        let chunks = chunker.chunk(source, &meta).unwrap();
+        let chunks = chunker.chunk(source, &meta).unwrap().chunks;
 
         assert_eq!(chunks.len(), 1, "unsupported extension should return 1 whole-file chunk");
         assert_eq!(chunks[0].chunk_type, "file");
@@ -129,7 +149,7 @@ fn greet() {
 "#;
         let chunker = AstChunker::new();
         let meta = meta_for("src/lib.rs", "rs");
-        let chunks = chunker.chunk(source, &meta).unwrap();
+        let chunks = chunker.chunk(source, &meta).unwrap().chunks;
 
         assert!(!chunks.is_empty());
         let first = &chunks[0];
