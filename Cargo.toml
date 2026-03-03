@@ -12,8 +12,8 @@ keywords = ["ai-agents", "tree-sitter", "code-analysis", "ingestion", "knowledge
 categories = ["development-tools", "parser-implementations"]
 
 [dependencies]
-corvia-common = { path = "../corvia/crates/corvia-common" }
-corvia-kernel = { path = "../corvia/crates/corvia-kernel" }
+corvia-common = { git = "https://github.com/chunzhe10/corvia", tag = "v0.3.1" }
+corvia-kernel = { git = "https://github.com/chunzhe10/corvia", tag = "v0.3.1" }
 async-trait = "0.1"
 tree-sitter = "0.26"
 tree-sitter-language = "0.1"
